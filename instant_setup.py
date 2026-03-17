@@ -266,6 +266,8 @@ def setup_server():
 
 def bill_info(instance_id: str = None):
     info = _get_local_server_info()
+    if not info:
+        return print("No info")
     instance_id = info.get("id") if not instance_id else instance_id
     r = _get_instance(instance_id)
     if not r:
