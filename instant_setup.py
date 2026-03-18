@@ -226,8 +226,8 @@ def _create_qr(ss_url: str):
     qr = qrcode.QRCode(
         version=None,
         error_correction=qrcode.constants.ERROR_CORRECT_Q,
-        box_size=12,
-        border=0,
+        box_size=9,
+        border=1,
     )
     qr.add_data(ss_url)
     qr.make(fit=True)
