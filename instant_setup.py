@@ -4,7 +4,7 @@ IOS: shadowrocket: https://apps.apple.com/app/id932747118
 """
 
 # First time: get an API key from https://vultr.com/ and replace the value of API_KEY below.
-API_KEY = ""
+API_KEY = "YOUR_API_KEY_HERE"
 
 # region Functions
 server_info = "server_info.txt"
@@ -21,6 +21,7 @@ import paramiko
 import requests
 import yaml
 import qrcode
+from PIL import Image, ImageDraw
 
 # Vultr API functions
 
@@ -225,12 +226,35 @@ def _create_qr(ss_url: str):
     qr = qrcode.QRCode(
         version=None,
         error_correction=qrcode.constants.ERROR_CORRECT_Q,
-        box_size=10,
-        border=4,
+        box_size=12,
+        border=0,
     )
     qr.add_data(ss_url)
     qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
+
+    img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+
+    width, height = img.size
+
+    gradient = Image.new("RGB", (width, height))
+    draw = ImageDraw.Draw(gradient)
+
+    for y in range(height):
+        for x in range(width):
+            ratio = (x + y) / (width + height)
+            r = int(255 * (1 - ratio) + 80 * ratio)
+            g = int(100 * (1 - ratio) + 255 * ratio)
+            b = int(170 * (1 - ratio) + 255 * ratio)
+            draw.point((x, y), fill=(r, g, b))
+
+    pixels = img.load()
+    grad_pixels = gradient.load()
+
+    for y in range(height):
+        for x in range(width):
+            if pixels[x, y] == (0, 0, 0):
+                pixels[x, y] = grad_pixels[x, y]
+
     img.save(qr_file)
 
 
