@@ -9,6 +9,7 @@ API_KEY = ""
 # region Functions
 server_info = "server_info.txt"
 yaml_file = "config.yaml"
+qr_file = "ss_qr.png"
 
 from datetime import datetime, timezone
 import base64
@@ -19,6 +20,7 @@ import time
 import paramiko
 import requests
 import yaml
+import qrcode
 
 # Vultr API functions
 
@@ -178,7 +180,7 @@ def _get_local_server_info():
     return info
 
 
-def _create_yaml(ss_url):
+def _create_yaml(ss_url: str):
     body = ss_url[5:]
     if "#" in body:
         body, name = body.split("#", 1)
@@ -217,6 +219,19 @@ def _create_yaml(ss_url):
         yaml.dump(config, f, sort_keys=False)
 
     print("Clash YAML created successfully.")
+
+
+def _create_qr(ss_url: str):
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_Q,
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(ss_url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    img.save(qr_file)
 
 
 # The main functions
@@ -260,8 +275,9 @@ def setup_server():
 
     my_ss_key = _ssh_connect(address, password, instance_id)
     _create_yaml(my_ss_key)
-    print("Shadowrocket link:")
+    print("Shadowrocket link and QR code created successfully:")
     print((my_ss_key).split("#")[0])
+    _create_qr((my_ss_key).split("#")[0])
 
 
 def bill_info(instance_id: str = None):
