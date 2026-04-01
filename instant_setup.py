@@ -1,41 +1,61 @@
 """
 Windows/Android: https://github.com/clash-download/Clash
-IOS: shadowrocket: https://apps.apple.com/app/id932747118
+iOS: Shadowrocket: https://apps.apple.com/app/id932747118
 """
 
-# First time: get an API key from https://vultr.com/ and replace the value of API_KEY below.
-API_KEY = "YOUR_API_KEY_HERE"
+API_KEY = "YOUR_API_KEY_HERE"  # ← Please fill in your Vultr API Key
 
-# region Functions
-server_info = "server_info.txt"
-yaml_file = "config.yaml"
-qr_file = "ss_qr.png"
+# ==================== Constants ====================
+API_BASE = "https://api.vultr.com/v2"
+HEADERS = {"Authorization": f"Bearer {API_KEY}"}
 
+SERVER_INFO_FILE = "server_info.txt"
+YAML_FILE = "config.yaml"
+QR_FILE = "ss_qr.png"
+
+# ==================== Standard Library ====================
 from datetime import datetime, timezone
 import base64
 import json
 import re
 import time
 
+# ==================== Third Party ====================
 import paramiko
 import requests
 import yaml
 import qrcode
 from PIL import Image, ImageDraw
 
-# Vultr API functions
+
+# ==================== Utility Functions ====================
+
+
+def _request(method, endpoint, **kwargs):
+    url = f"{API_BASE}{endpoint}"
+    headers = kwargs.pop("headers", {})
+    headers.update(HEADERS)
+
+    r = requests.request(method, url, headers=headers, **kwargs)
+
+    if not r.ok:
+        raise Exception(f"API Error {r.status_code}: {r.text}")
+
+    return r.json() if r.text else {}
+
+
+# ==================== Vultr API ====================
 
 
 def _list_instances():
-    url = "https://api.vultr.com/v2/instances"
-    headers = {"Authorization": f"Bearer {API_KEY}"}
-    response = requests.get(url, headers=headers)
-    return response.json()
+    return _request("GET", "/instances")
+
+
+def _get_instance(instance_id):
+    return _request("GET", f"/instances/{instance_id}")
 
 
 def _deploy_instance(region, plan, os_id, label):
-    url = "https://api.vultr.com/v2/instances"
-    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
     data = {
         "region": region,
         "plan": plan,
@@ -43,337 +63,289 @@ def _deploy_instance(region, plan, os_id, label):
         "label": label,
         "enable_ipv6": False,
     }
-    response = requests.post(url, json=data, headers=headers).json()
-    password = response["instance"]["default_password"]
-    ins_id = response["instance"]["id"]
 
-    with open(server_info, "w", encoding="utf-8") as f:
-        f.write(f"id: {ins_id}\n")
+    res = _request("POST", "/instances", json=data)
+    ins = res["instance"]
+
+    with open(SERVER_INFO_FILE, "w", encoding="utf-8") as f:
+        f.write(f"id: {ins['id']}\n")
         f.write(f"user: root\n")
-        f.write(f"password: {password}\n")
+        f.write(f"password: {ins['default_password']}\n")
 
-    return password, ins_id, json.dumps(response, indent=2)
-
-
-def _get_instance(instance_id: str):
-    url = f"https://api.vultr.com/v2/instances/{instance_id}"
-    headers = {"Authorization": f"Bearer {API_KEY}"}
-
-    r = requests.get(url, headers=headers)
-    return r.json() if r.status_code == 200 else None
+    return ins["default_password"], ins["id"], json.dumps(res, indent=2)
 
 
-def _reboot_instance(instance_id: str):
-    url = f"https://api.vultr.com/v2/instances/{instance_id}/reboot"
-    headers = {"Authorization": f"Bearer {API_KEY}"}
-    response = requests.post(url, headers=headers)
-    if response.status_code == 204:
-        print(f"Instance {instance_id} rebooted successfully.")
-    else:
-        print(
-            f"Failed to reboot instance {instance_id}: {response.status_code}, {response.text}"
-        )
+def _reboot_instance(instance_id):
+    _request("POST", f"/instances/{instance_id}/reboot")
+    print(f"🔄 Rebooted instance {instance_id}")
 
 
-def _destroy_instance(instance_id: str):
-    url = f"https://api.vultr.com/v2/instances/{instance_id}"
-    headers = {"Authorization": f"Bearer {API_KEY}"}
-    r = requests.delete(url, headers=headers)
-
-    if r.status_code == 204:
-        return {"status": "success", "message": f"Instance {instance_id} destroyed."}
-    else:
-        print(f"Destroy instance failed: {r.status_code}, {r.text}")
+def _destroy_instance(instance_id):
+    requests.delete(f"{API_BASE}/instances/{instance_id}", headers=HEADERS)
+    print(f"🗑 Destroyed instance {instance_id}")
 
 
-def _wait_ip_ready(instance_id: str):
+def _wait_ip_ready(instance_id):
     while True:
-        info = _get_instance(instance_id)
-        status = info["instance"]["status"]
-        server_status = info["instance"]["server_status"]
-        print(f"Instance status: {status} - Server status: {server_status}")
+        info = _get_instance(instance_id)["instance"]
+        print(f"Status: {info['status']} / {info['server_status']}")
 
-        if status == "active" and server_status == "ok":
-            ip = info["instance"]["main_ip"]
-            print(f"Instance is active now. Host IP Address: {ip}")
-            with open(server_info, "a", encoding="utf-8") as f:
+        if info["status"] == "active" and info["server_status"] == "ok":
+            ip = info["main_ip"]
+
+            with open(SERVER_INFO_FILE, "a") as f:
                 f.write(f"ip: {ip}\n")
 
+            print(f"✅ IP Ready: {ip}")
             return ip
 
         time.sleep(10)
 
 
-# SSH and config generation functions
+# ==================== SSH ====================
 
 
 def _run_cmd(client, cmd):
     stdin, stdout, stderr = client.exec_command(cmd)
-
-    exit_status = stdout.channel.recv_exit_status()
-
-    out = stdout.read().decode()
-    err = stderr.read().decode()
-
-    return exit_status, out, err
+    stdout.channel.recv_exit_status()
+    return stdout.read().decode(), stderr.read().decode()
 
 
 def _ssh_connect(address, password, instance_id):
-    attempt, attempt_max = 0, 3
-    while True:
+    for attempt in range(1, 4):
         try:
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             client.connect(address, username="root", password=password)
-            print("SSH connection established.")
+            print("✅ SSH connected")
             break
-
         except Exception as e:
-            attempt += 1
-            print(
-                f"SSH connection failed: {e}. Retrying in 20 seconds... ({attempt}/{attempt_max})"
-            )
-
-            if attempt >= attempt_max:
-                print(f"SSH failed {attempt_max} times. Rebooting instance...")
-                _reboot_instance(instance_id)
-                attempt = 0
-
+            print(f"❌ SSH failed ({attempt}/3): {e}")
             time.sleep(20)
+    else:
+        print("🔄 Rebooting...")
+        _reboot_instance(instance_id)
+        return _ssh_connect(address, password, instance_id)
 
     _run_cmd(
         client,
-        "bash <(wget -qO- -o- https://github.com/233boy/sing-box/raw/main/install.sh)",
+        "bash <(wget -qO- https://github.com/233boy/sing-box/raw/main/install.sh)",
     )
     _run_cmd(client, "sb bbr")
-    _, output, _ = _run_cmd(client, "sb add ss")
-    print(output.split("------------- 链接 (URL) ------------")[0])
-    my_ss_key = re.search(r"ss://[^\s]+", output).group(0)
-    port = re.search(r":(\d{4,5})", output).group(1)
-    print(f"Opening firewall port {port}...")
+
+    out, _ = _run_cmd(client, "sb add ss")
+
+    match = re.search(r"ss://[^\s]+", out)
+    if not match:
+        raise Exception("❌ SS link not found")
+
+    ss_url = match.group(0)
+    port = re.search(r":(\d{4,5})", out).group(1)
+
+    _run_cmd(client, "ufw --force enable")
     _run_cmd(client, f"ufw allow {port}")
 
-    _, output, _ = _run_cmd(client, "ufw status numbered")
-    if str(port) not in output:
-        print(f"Failed to open port {port} in firewall. Please check.")
     client.close()
-    print("SSH connection closed.")
-    return my_ss_key
+    return ss_url
 
 
-def _get_local_server_info():
-    try:
-        info = {}
-
-        with open(server_info, "r", encoding="utf-8") as f:
-            for line in f:
-                key, value = line.strip().split(":", 1)
-                info[key] = value.strip()
-
-        if len(info) == 0 or not info:
-            print("No valid server info found. Please deploy an instance first.")
-            return
-
-    except FileNotFoundError:
-        print(f"{server_info} not found.")
-        return
-
-    return info
+# ==================== Configuration ====================
 
 
-def _create_yaml(ss_url: str):
+def _parse_ss(ss_url):
     body = ss_url[5:]
+
     if "#" in body:
-        body, name = body.split("#", 1)
-    else:
-        name = "MySS"
+        body, _ = body.split("#", 1)
 
     b64_part, server_part = body.split("@")
+
     decoded = base64.urlsafe_b64decode(b64_part + "=" * (-len(b64_part) % 4)).decode()
+
     cipher, password = decoded.split(":")
     server, port = server_part.split(":")
+
+    return {
+        "name": "MySS",
+        "server": server,
+        "port": int(port),
+        "cipher": cipher,
+        "password": password,
+    }
+
+
+def _create_yaml(ss_url):
+    cfg = _parse_ss(ss_url)
 
     config = {
         "port": 7890,
         "socks-port": 7891,
-        "allow-lan": False,
         "mode": "Rule",
         "log-level": "info",
         "proxies": [
             {
-                "name": name,
+                **cfg,
                 "type": "ss",
-                "server": server,
-                "port": int(port),
-                "cipher": cipher,
-                "password": password,
                 "udp": True,
             }
         ],
         "proxy-groups": [
-            {"name": "Proxy", "type": "select", "proxies": [name, "DIRECT"]}
+            {"name": "Proxy", "type": "select", "proxies": [cfg["name"], "DIRECT"]}
         ],
         "rules": ["MATCH,Proxy"],
     }
 
-    with open(yaml_file, "w") as f:
+    with open(YAML_FILE, "w") as f:
         yaml.dump(config, f, sort_keys=False)
 
-    print("Clash YAML created successfully.")
+    print("✅ YAML created")
 
 
-def _create_qr(ss_url: str):
-    qr = qrcode.QRCode(
-        version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_Q,
-        box_size=9,
-        border=1,
-    )
-    qr.add_data(ss_url)
-    qr.make(fit=True)
+def _create_qr(ss_url):
 
-    img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    ss_url = ss_url.split("#")[0] if "#" in ss_url else ss_url
+    qr = qrcode.make(ss_url).convert("RGB")
 
-    width, height = img.size
-
-    gradient = Image.new("RGB", (width, height))
+    w, h = qr.size
+    gradient = Image.new("RGB", (w, h))
     draw = ImageDraw.Draw(gradient)
 
-    for y in range(height):
-        for x in range(width):
-            ratio = (x + y) / (width + height)
-            r = int(255 * (1 - ratio) + 80 * ratio)
-            g = int(100 * (1 - ratio) + 255 * ratio)
-            b = int(170 * (1 - ratio) + 255 * ratio)
-            draw.point((x, y), fill=(r, g, b))
+    for y in range(h):
+        for x in range(w):
+            ratio = (x + y) / (w + h)
+            color = (
+                int(255 * (1 - ratio) + 80 * ratio),
+                int(100 * (1 - ratio) + 255 * ratio),
+                int(170 * (1 - ratio) + 255 * ratio),
+            )
+            draw.point((x, y), fill=color)
 
-    pixels = img.load()
+    pixels = qr.load()
     grad_pixels = gradient.load()
 
-    for y in range(height):
-        for x in range(width):
+    for y in range(h):
+        for x in range(w):
             if pixels[x, y] == (0, 0, 0):
                 pixels[x, y] = grad_pixels[x, y]
 
-    img.save(qr_file)
+    qr.save(QR_FILE)
+    print("✅ QR created")
 
 
-# The main functions
+# ==================== Local ====================
+
+
+def _get_local_info():
+    try:
+        info = {}
+        with open(SERVER_INFO_FILE) as f:
+            for line in f:
+                k, v = line.strip().split(":", 1)
+                info[k] = v.strip()
+        return info
+    except:
+        return None
+
+
+# ==================== Main Functions ====================
 
 
 def setup_server():
-    if len((ins_list := _list_instances()).get("instances", [])) > 0:
-        print("------------------------------")
-        for ins in ins_list["instances"]:
-            print(f"ID: {ins['id']}, IP: {ins['main_ip']}, Status: {ins['status']}")
-            print("------------------------------")
-        print("One or more instances are already running...")
-        print("Type 'new' to continue deploying a new one: ")
-        print("Type 'old' to connect to the existing instance and run script:")
+    instances = _list_instances().get("instances", [])
 
-        confirm = input().strip().lower()
+    if instances:
+        print("\nExisting instances:")
+        for ins in instances:
+            print(f"{ins['id']} | {ins['main_ip']} | {ins['status']}")
+
+        choice = input("new / old: ").strip()
     else:
-        confirm = "new"
+        choice = "new"
 
-    if confirm == "new":
-        print("Deploying a new instance...")
-        password, instance_id, dep_info = _deploy_instance(
-            "icn", "vc2-1c-1gb", 2657, "AA"
-        )
-        print(f"Instance deploying: \n{dep_info}")
-        print(f"Waiting for the instance to be running and IP to be ready...")
-        address = _wait_ip_ready(instance_id)
-    elif confirm == "old":
-        info = _get_local_server_info()
+    if choice == "new":
+        pwd, ins_id, _ = _deploy_instance("icn", "vc2-1c-1gb", 2657, "node")
+        ip = _wait_ip_ready(ins_id)
+    else:
+        info = _get_local_info()
         if not info:
-            return
-        address = info.get("ip")
-        password = info.get("password")
-        instance_id = info.get("id")
-        if not address or not password:
-            print("Incomplete server info. Please check the server_info.txt file.")
-            return
-    else:
-        print("Invalid input. Deployment canceled.")
-        return
+            return print("❌ No local info")
 
-    my_ss_key = _ssh_connect(address, password, instance_id)
-    _create_yaml(my_ss_key)
-    print("Shadowrocket link and QR code created successfully:")
-    print((my_ss_key).split("#")[0])
-    _create_qr((my_ss_key).split("#")[0])
+        ip = info["ip"]
+        pwd = info["password"]
+        ins_id = info["id"]
+
+    ss = _ssh_connect(ip, pwd, ins_id)
+
+    _create_yaml(ss)
+    _create_qr(ss)
+
+    print("\n🔗 SS URL:")
+    print(ss.split("#")[0])
 
 
-def bill_info(instance_id: str = None):
-    info = _get_local_server_info()
+def bill_info():
+    info = _get_local_info()
     if not info:
-        return print("No info")
-    instance_id = info.get("id") if not instance_id else instance_id
-    r = _get_instance(instance_id)
-    if not r:
-        print(f"Instance {instance_id} not found.")
-        return
-    unpaid_charges = r["instance"]["pending_charges"]
-    duration = datetime.now(timezone.utc) - datetime.fromisoformat(
-        r["instance"]["date_created"]
-    )
+        return print("❌ No info")
+
+    ins = _get_instance(info["id"])["instance"]
+
+    duration = datetime.now(timezone.utc) - datetime.fromisoformat(ins["date_created"])
     seconds = int(duration.total_seconds())
 
-    hh, mm = seconds // 3600, (seconds % 3600) // 60
-    print("------------------------------")
-    print(f"ID: {instance_id}, Run-Time: {hh}h {mm}m, Unpaid: ${unpaid_charges:.2f}")
-    print("------------------------------")
+    print(f"⏱ {seconds//3600}h {(seconds%3600)//60}m")
+    print(f"💰 ${ins['pending_charges']:.2f}")
 
 
-def shutdown_server(instance_id: str = None):
-    info = _get_local_server_info()
-    instance_id = info.get("id") if not instance_id else instance_id
-    r = _get_instance(instance_id)
-    if not r:
-        print(f"Instance {instance_id} not found.")
-        return
-    ip = r["instance"]["main_ip"]
-    status = r["instance"]["status"]
-    print("------------------------------")
-    print(f"ID: {instance_id}, IP: {ip}, Status: {status}")
-    print("------------------------------")
-    confirm = input(f"Type 'yes' to destroy instance {instance_id}: ")
+def destroy_server():
+    info = _get_local_info()
+    if not info:
+        return print("❌ No info")
 
-    if confirm.strip().lower() == "yes":
-        destroy_response = _destroy_instance(instance_id)
-        print(destroy_response)
-
-        open(server_info, "w").close()
-    else:
-        print("Destroy canceled.")
+    confirm = input("Type YES to destroy: ")
+    if confirm == "YES":
+        _destroy_instance(info["id"])
+        open(SERVER_INFO_FILE, "w").close()
 
 
-funcs = {
+def account_info():
+    res = _request("GET", "/account")
+    print(json.dumps(res, indent=2))
+
+
+# ==================== CLI ====================
+
+MENU = {
     "1": ("Deploy", setup_server),
     "2": ("Duration", bill_info),
-    "3": ("Destroy", shutdown_server),
+    "3": ("Destroy", destroy_server),
+    "4": ("Account", account_info),
 }
 
 
 def main():
-    print("🚀 Fast VPN Server Setup")
+    if not API_KEY:
+        raise ValueError("❌ Please set API_KEY")
+
     while True:
-        print("\n   Server Menu: [0 quit]")
-        for key, (desc, _) in funcs.items():
-            print(f"{key}. {desc}")
+        print("\n🚀 Fast VPN")
+        for k, v in MENU.items():
+            print(f"{k}. {v[0]}")
+        print("0. Exit")
 
-        choice = input("Enter a number: ").strip()
+        c = input("Select: ").strip()
 
-        if choice == "0":
-            print("Bye!")
+        if c == "0":
             break
-        elif choice in funcs:
-            funcs[choice][1]()
+
+        if c in MENU:
+            try:
+                MENU[c][1]()
+            except Exception as e:
+                print(f"❌ Err: {e}")
         else:
-            print("❌ Invalid input! Please enter a valid number.")
+            print("❌ Invalid")
 
 
 if __name__ == "__main__":
     main()
-
-# endregion
