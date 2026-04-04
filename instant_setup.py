@@ -26,6 +26,10 @@ YAML_FILENAME = "config.yaml"
 
 API_BASE = "https://api.vultr.com/v2"
 HEADERS = {"Authorization": f"Bearer {API_KEY}"}
+REGION = "icn"  # Seoul, South Korea
+PLAN = "vc2-1c-1gb"  # vc2-1c-1gb $0.007/hr, vhp-1c-1gb $0.008/hr
+OS_ID = 2657  # Ubuntu 22.04 x64
+LABEL = "AA_VPN"
 
 
 def timer(func):
@@ -33,7 +37,7 @@ def timer(func):
         start = time.perf_counter()
         result = func(*args, **kwargs)
         elapsed = time.perf_counter() - start
-        print(f"[timer] Executed in {elapsed:.2f}s")
+        print(f"🕛 Executed in {elapsed:.2f}s")
         return result
 
     return wrapper
@@ -100,7 +104,7 @@ def _run_cmd(client, cmd):
     return stdout.read().decode(), stderr.read().decode()
 
 
-def _ssh_connect(instance_id, password, attempts=4):
+def _ssh_connect(instance_id, password, attempts=6):
     address = _wait_instance(instance_id)
     for attempt in range(1, attempts + 1):
         try:
@@ -111,7 +115,7 @@ def _ssh_connect(instance_id, password, attempts=4):
             break
         except Exception as e:
             print(f"⚪ SSH no response, retrying... ({attempt}/{attempts}): {e}")
-            time.sleep(5)
+
     else:
         print("🔴 Error occurred, try rebooting...")
         _reboot_instance(instance_id)
@@ -150,7 +154,7 @@ def _create_yaml(ss_url, output_path):
         server, port = server_part.split(":")
 
         return {
-            "name": "AA",
+            "name": LABEL,
             "server": server,
             "type": "ss",
             "port": int(port),
@@ -193,9 +197,9 @@ def setup_a_server():
     for _ in range(3, 0, -1):
         print(f"⚪ Deploying starts in {_}s...")
         time.sleep(1)
-    pwd, ins_id = _deploy_instance("icn", "vc2-1c-1gb", 2657, "node")
+    pwd, ins_id = _deploy_instance(REGION, PLAN, OS_ID, LABEL)
     ss = _ssh_connect(ins_id, pwd)
-    print(f"🟢 SS URL:\n {ss}")
+    print(f"🟢 {ss}")
     _create_qr(ss)
     try:
         _create_yaml(ss, YAML_FILENAME)
@@ -242,7 +246,7 @@ def main():
             seconds = int((datetime.now(timezone.utc) - created).total_seconds())
             print(f"🔵 Instance exists already: {earliest['main_ip']}, destroy it?")
             print(
-                f"🕒 Time: {seconds//3600}h {(seconds%3600)//60}m | 💵 Cost: ${my_ins.get('pending_charges', 0.0):.2f}"
+                f"🕒 Time: {seconds//3600}h {(seconds%3600)//60}m | 💵 Cost: ${my_ins.get('pending_charges', 0.0)}"
             )
             destroy_a_server(earliest)
         else:
