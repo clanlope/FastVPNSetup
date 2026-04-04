@@ -18,15 +18,12 @@ import paramiko
 import requests
 import yaml
 import qrcode
-from PIL import Image, ImageDraw
 from datetime import datetime, timezone
 
 API_KEY = os.getenv("API_KEY_VULTR", "")
+YAML_FILENAME = "config.yaml"
 API_BASE = "https://api.vultr.com/v2"
 HEADERS = {"Authorization": f"Bearer {API_KEY}"}
-
-YAML_FILENAME = "config.yaml"
-QR_FILENAME = "ss_qr.png"
 
 
 def _request(method, endpoint, **kwargs):
@@ -161,40 +158,18 @@ def _create_yaml(ss_url, output_path):
         ],
         "rules": ["MATCH,Proxy"],
     }
-
-    with open(YAML_FILENAME, "w") as f:
+    with open(output_path, "w") as f:
         yaml.dump(config, f, sort_keys=False)
 
     print("🟢 YAML.config created [Clash]")
 
 
-def _create_qr(ss_url, output_path):
-    qr = qrcode.make(ss_url).convert("RGB")
-
-    w, h = qr.size
-    gradient = Image.new("RGB", (w, h))
-    draw = ImageDraw.Draw(gradient)
-
-    for y in range(h):
-        for x in range(w):
-            ratio = (x + y) / (w + h)
-            color = (
-                int(255 * (1 - ratio) + 80 * ratio),
-                int(100 * (1 - ratio) + 255 * ratio),
-                int(170 * (1 - ratio) + 255 * ratio),
-            )
-            draw.point((x, y), fill=color)
-
-    pixels = qr.load()
-    grad_pixels = gradient.load()
-
-    for y in range(h):
-        for x in range(w):
-            if pixels[x, y] == (0, 0, 0):
-                pixels[x, y] = grad_pixels[x, y]
-
-    qr.save(output_path)
-    print("🟢 QR created")
+def _create_qr(ss_url):
+    qr = qrcode.QRCode()
+    qr.add_data(ss_url)
+    qr.make()
+    qr.print_ascii()
+    print("🟢 QR printed in terminal")
 
 
 # ==================== Main Functions ====================
@@ -208,9 +183,12 @@ def setup_a_server():
     ip = _wait_instance(ins_id)
 
     ss = _ssh_connect(ip, pwd, ins_id)
-    _create_yaml(ss, YAML_FILENAME)
-    _create_qr(ss, QR_FILENAME)
     print(f"🟢 SS URL:\n {ss}")
+    _create_qr(ss)
+    try:
+        _create_yaml(ss, YAML_FILENAME)
+    except Exception as e:
+        print(f"⚪ Error creating config: {e}")
 
 
 def destroy_a_server(earliest=None):
