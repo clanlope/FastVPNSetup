@@ -21,8 +21,9 @@ import qrcode
 from PIL import Image, ImageDraw
 from datetime import datetime, timezone
 
+API_KEY = os.getenv("API_KEY_VULTR", "")
 API_BASE = "https://api.vultr.com/v2"
-HEADERS = {"Authorization": f"Bearer {os.getenv('API_KEY_VULTR', '')}"}
+HEADERS = {"Authorization": f"Bearer {API_KEY}"}
 
 YAML_FILENAME = "config.yaml"
 QR_FILENAME = "ss_qr.png"
