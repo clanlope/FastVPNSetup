@@ -22,8 +22,21 @@ from datetime import datetime, timezone
 
 API_KEY = os.getenv("API_KEY_VULTR", "")
 YAML_FILENAME = "config.yaml"
+
+
 API_BASE = "https://api.vultr.com/v2"
 HEADERS = {"Authorization": f"Bearer {API_KEY}"}
+
+
+def timer(func):
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        elapsed = time.perf_counter() - start
+        print(f"[timer] Executed in {elapsed:.2f}s")
+        return result
+
+    return wrapper
 
 
 def _request(method, endpoint, **kwargs):
@@ -76,7 +89,7 @@ def _wait_instance(instance_id):
             print(f"🟢 IP: {info['main_ip']}")
             return info["main_ip"]
         iteration += 1
-        if iteration > 30:
+        if iteration > 10:
             raise TimeoutError("🔴 Instance did not become active in time")
         time.sleep(3)
 
@@ -87,21 +100,22 @@ def _run_cmd(client, cmd):
     return stdout.read().decode(), stderr.read().decode()
 
 
-def _ssh_connect(address, password, instance_id):
-    for attempt in range(1, 11):
+def _ssh_connect(instance_id, password, attempts=4):
+    address = _wait_instance(instance_id)
+    for attempt in range(1, attempts + 1):
         try:
             client = paramiko.SSHClient()
             client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            client.connect(address, username="root", password=password)
+            client.connect(address, username="root", password=password, timeout=10)
             print("🟢 SSH connection established")
             break
         except Exception as e:
-            print(f"⚪ SSH no response, retrying... ({attempt}/10): {e}")
+            print(f"⚪ SSH no response, retrying... ({attempt}/{attempts}): {e}")
             time.sleep(5)
     else:
         print("🔴 Error occurred, try rebooting...")
         _reboot_instance(instance_id)
-        return _ssh_connect(address, password, instance_id)
+        return _ssh_connect(instance_id, password)
 
     scr = "bash <(wget -qO- https://github.com/233boy/sing-box/raw/main/install.sh)"
     _run_cmd(client, scr)
@@ -180,9 +194,7 @@ def setup_a_server():
         print(f"⚪ Deploying starts in {_}s...")
         time.sleep(1)
     pwd, ins_id = _deploy_instance("icn", "vc2-1c-1gb", 2657, "node")
-    ip = _wait_instance(ins_id)
-
-    ss = _ssh_connect(ip, pwd, ins_id)
+    ss = _ssh_connect(ins_id, pwd)
     print(f"🟢 SS URL:\n {ss}")
     _create_qr(ss)
     try:
@@ -217,6 +229,7 @@ def check_account():
     print("\n".join(inner_lines))
 
 
+@timer
 def main():
     try:
         print("🚀 Vultr Server Setup")
